@@ -1,0 +1,3120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DocDash: QueueZero — Live Multi-Clinic Queue & Booking</title>
+    <!-- Load Inter font for clean clinical typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif']
+            }
+          }
+        }
+      };
+    </script>
+    <!-- Load React 18, ReactDOM 18, and Babel Standalone for browser JSX execution -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body class="bg-slate-50 text-slate-900 font-sans antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useRef, useMemo } = React;
+
+      // ============================================================================
+      // 1. INFRASTRUCTURE CONFIG & CONSTANTS
+      // ============================================================================
+      const STORAGE_KEY = 'docdash_queuezero_state_v1';
+      const THEME_STORAGE_KEY = 'docdash_queuezero_theme_v1';
+      const CHANNEL_NAME = 'docdash_queuezero_sync';
+      const EWMA_ALPHA = 0.4;
+      const MAX_CHECKIN_RADIUS_METERS = 500;
+
+      const DEFAULT_SHIFTS = ['Morning', 'Evening'];
+      const SPECIALTIES = ['Cardiology', 'General Medicine', 'Orthopedics', 'Pediatrics'];
+
+      const SEED_CLINICS = [
+        {
+          id: 1,
+          name: 'Apollo Care Central',
+          address: 'Banjara Hills, Road No. 12, Hyderabad',
+          lat: 17.4126,
+          lng: 78.4392,
+          heatmap: {
+            Mon: [22, 35, 18, 28],
+            Tue: [15, 25, 14, 20],
+            Wed: [18, 30, 16, 24],
+            Thu: [14, 22, 12, 19],
+            Fri: [25, 38, 20, 32],
+            Sat: [30, 45, 28, 36]
+          }
+        },
+        {
+          id: 2,
+          name: 'Metro Health Hub',
+          address: 'Jubilee Hills, Checkpost, Hyderabad',
+          lat: 17.4325,
+          lng: 78.4071,
+          heatmap: {
+            Mon: [18, 28, 15, 22],
+            Tue: [12, 20, 11, 18],
+            Wed: [16, 26, 14, 21],
+            Thu: [14, 24, 13, 19],
+            Fri: [20, 32, 18, 27],
+            Sat: [26, 40, 24, 34]
+          }
+        },
+        {
+          id: 3,
+          name: 'Sunrise Family Clinic',
+          address: 'Gachibowli, Financial District, Hyderabad',
+          lat: 17.4401,
+          lng: 78.3489,
+          heatmap: {
+            Mon: [16, 24, 14, 20],
+            Tue: [12, 18, 10, 16],
+            Wed: [14, 22, 12, 18],
+            Thu: [13, 20, 11, 17],
+            Fri: [19, 29, 17, 25],
+            Sat: [24, 36, 22, 30]
+          }
+        },
+        {
+          id: 4,
+          name: 'CarePlus Polyclinic',
+          address: 'Madhapur, Hitech City Main Rd, Hyderabad',
+          lat: 17.4483,
+          lng: 78.3915,
+          heatmap: {
+            Mon: [20, 32, 17, 25],
+            Tue: [14, 22, 12, 18],
+            Wed: [15, 25, 14, 20],
+            Thu: [13, 21, 12, 17],
+            Fri: [22, 34, 19, 28],
+            Sat: [28, 42, 25, 35]
+          }
+        }
+      ];
+
+      const SEED_DOCTORS = [
+        {
+          id: 1,
+          clinic_id: 1,
+          name: 'Dr. Rajesh Mehta',
+          specialty: 'Cardiology',
+          qualification: 'MD, DM (Cardiology)',
+          fee: 800,
+          base_avg_mins: 12,
+          recent_durations: [11, 13, 12, 11, 13],
+          status: 'In Consultation',
+          offset_delay_mins: 0,
+          shifts: ['Morning', 'Evening']
+        },
+        {
+          id: 2,
+          clinic_id: 1,
+          name: 'Dr. Ananya Sharma',
+          specialty: 'General Medicine',
+          qualification: 'MBBS, MD (Internal Med)',
+          fee: 500,
+          base_avg_mins: 10,
+          recent_durations: [9, 11, 10, 10, 10],
+          status: 'In Consultation',
+          offset_delay_mins: 0,
+          shifts: ['Morning']
+        },
+        {
+          id: 3,
+          clinic_id: 2,
+          name: 'Dr. Vikram Rao',
+          specialty: 'Orthopedics',
+          qualification: 'MS (Ortho)',
+          fee: 700,
+          base_avg_mins: 14,
+          recent_durations: [14, 15, 13, 14, 14],
+          status: 'In Consultation',
+          offset_delay_mins: 5,
+          shifts: ['Morning', 'Evening']
+        },
+        {
+          id: 4,
+          clinic_id: 2,
+          name: 'Dr. Priya Nair',
+          specialty: 'Pediatrics',
+          qualification: 'MD (Pediatrics)',
+          fee: 600,
+          base_avg_mins: 11,
+          recent_durations: [10, 12, 11, 11, 11],
+          status: 'On Break',
+          offset_delay_mins: 10,
+          shifts: ['Morning']
+        },
+        {
+          id: 5,
+          clinic_id: 3,
+          name: 'Dr. Siddharth Verma',
+          specialty: 'Cardiology',
+          qualification: 'MD, DNB (Cardio)',
+          fee: 850,
+          base_avg_mins: 15,
+          recent_durations: [14, 16, 15, 15, 15],
+          status: 'In Consultation',
+          offset_delay_mins: 0,
+          shifts: ['Evening']
+        },
+        {
+          id: 6,
+          clinic_id: 3,
+          name: 'Dr. Kavita Reddy',
+          specialty: 'Pediatrics',
+          qualification: 'MBBS, DCH',
+          fee: 550,
+          base_avg_mins: 10,
+          recent_durations: [10, 9, 11, 10, 10],
+          status: 'In Consultation',
+          offset_delay_mins: 0,
+          shifts: ['Morning', 'Evening']
+        },
+        {
+          id: 7,
+          clinic_id: 4,
+          name: 'Dr. Arjun Kapoor',
+          specialty: 'Orthopedics',
+          qualification: 'MS, MCh (Ortho)',
+          fee: 750,
+          base_avg_mins: 13,
+          recent_durations: [12, 14, 13, 13, 13],
+          status: 'Delayed',
+          offset_delay_mins: 15,
+          shifts: ['Morning', 'Evening']
+        },
+        {
+          id: 8,
+          clinic_id: 4,
+          name: 'Dr. Meera Joshi',
+          specialty: 'General Medicine',
+          qualification: 'MBBS, MD',
+          fee: 450,
+          base_avg_mins: 10,
+          recent_durations: [10, 10, 11, 9, 10],
+          status: 'In Consultation',
+          offset_delay_mins: 0,
+          shifts: ['Morning', 'Evening']
+        }
+      ];
+
+      const SEED_TOKENS = [
+        { id: 101, doctor_id: 1, shift: 'Morning', token_number: 10, patient_name: 'Rohan Das', patient_phone: '+91-9876543210', state: 'Completed', is_emergency: false, checked_in: true, sms_sent: false, prescription: 'Tab. Atorvastatin 10mg once daily at night. Low-salt diet. Review in 4 weeks.', created_at: '2026-11-19T09:00:00Z' },
+        { id: 102, doctor_id: 1, shift: 'Morning', token_number: 11, patient_name: 'Sneha Kulkarni', patient_phone: '+91-9876543211', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:05:00Z' },
+        { id: 103, doctor_id: 1, shift: 'Morning', token_number: 12, patient_name: 'Amitabh Sen', patient_phone: '+91-9876543212', state: 'Waiting', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:10:00Z' },
+        { id: 104, doctor_id: 1, shift: 'Morning', token_number: 13, patient_name: 'Pooja Hegde', patient_phone: '+91-9876543213', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T09:15:00Z' },
+        { id: 105, doctor_id: 1, shift: 'Morning', token_number: 14, patient_name: 'Patient A (Demo User)', patient_phone: '+91-9900112233', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T09:20:00Z' },
+        { id: 106, doctor_id: 1, shift: 'Morning', token_number: 15, patient_name: 'Karthik Nair', patient_phone: '+91-9876543215', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T09:25:00Z' },
+        { id: 107, doctor_id: 2, shift: 'Morning', token_number: 1, patient_name: 'Divya Menon', patient_phone: '+91-9811111101', state: 'Completed', is_emergency: false, checked_in: true, sms_sent: false, prescription: 'Paracetamol 650mg SOS for fever. Hydration and rest.', created_at: '2026-11-19T09:00:00Z' },
+        { id: 108, doctor_id: 2, shift: 'Morning', token_number: 2, patient_name: 'Nikhil Verma', patient_phone: '+91-9811111102', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:10:00Z' },
+        { id: 109, doctor_id: 2, shift: 'Morning', token_number: 3, patient_name: 'Fatima Sheikh', patient_phone: '+91-9811111103', state: 'Waiting', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:15:00Z' },
+        { id: 110, doctor_id: 2, shift: 'Morning', token_number: 4, patient_name: 'Suresh Babu', patient_phone: '+91-9811111104', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T09:20:00Z' },
+        { id: 111, doctor_id: 3, shift: 'Morning', token_number: 5, patient_name: 'Manoj Tiwari', patient_phone: '+91-9822222201', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:00:00Z' },
+        { id: 112, doctor_id: 3, shift: 'Morning', token_number: 6, patient_name: 'Anjali Desai', patient_phone: '+91-9822222202', state: 'Waiting', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:10:00Z' },
+        { id: 113, doctor_id: 3, shift: 'Morning', token_number: 7, patient_name: 'Rakesh Roshan', patient_phone: '+91-9822222203', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T09:20:00Z' },
+        { id: 114, doctor_id: 4, shift: 'Morning', token_number: 8, patient_name: 'Baby Aarav', patient_phone: '+91-9833333301', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:05:00Z' },
+        { id: 115, doctor_id: 4, shift: 'Morning', token_number: 9, patient_name: 'Baby Diya', patient_phone: '+91-9833333302', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T09:15:00Z' },
+        { id: 116, doctor_id: 5, shift: 'Evening', token_number: 1, patient_name: 'Harishankar Pillai', patient_phone: '+91-9844444401', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T17:00:00Z' },
+        { id: 117, doctor_id: 5, shift: 'Evening', token_number: 2, patient_name: 'Lakshmi Narayanan', patient_phone: '+91-9844444402', state: 'Waiting', is_emergency: false, checked_in: false, sms_sent: false, prescription: '', created_at: '2026-11-19T17:10:00Z' },
+        { id: 118, doctor_id: 6, shift: 'Morning', token_number: 3, patient_name: 'Master Kabir', patient_phone: '+91-9855555501', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:30:00Z' },
+        { id: 119, doctor_id: 7, shift: 'Evening', token_number: 4, patient_name: 'Gautam Gambhir', patient_phone: '+91-9866666601', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T17:15:00Z' },
+        { id: 120, doctor_id: 8, shift: 'Morning', token_number: 2, patient_name: 'Shweta Bachchan', patient_phone: '+91-9877777701', state: 'Active', is_emergency: false, checked_in: true, sms_sent: false, prescription: '', created_at: '2026-11-19T09:25:00Z' }
+      ];
+
+      // ============================================================================
+      // INLINE SVG ICON SET (Zero external icon bundler dependencies)
+      // ============================================================================
+      function Icon({ name, className = 'w-4 h-4' }) {
+        const icons = {
+          activity: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+          ),
+          bell: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+          ),
+          calendar: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect width="18" height="18" x="3" y="4" rx="2" ry="2" />
+              <line x1="16" x2="16" y1="2" y2="6" />
+              <line x1="8" x2="8" y1="2" y2="6" />
+              <line x1="3" x2="21" y1="10" y2="10" />
+            </svg>
+          ),
+          checkCircle: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+          ),
+          clock: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+          ),
+          fileText: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" x2="8" y1="13" y2="13" />
+              <line x1="16" x2="8" y1="17" y2="17" />
+              <line x1="10" x2="8" y1="9" y2="9" />
+            </svg>
+          ),
+          mapPin: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+              <circle cx="12" cy="10" r="3" />
+            </svg>
+          ),
+          messageSquare: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          ),
+          navigation: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="3 11 22 2 13 21 11 13 3 11" />
+            </svg>
+          ),
+          plus: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" x2="12" y1="5" y2="19" />
+              <line x1="5" x2="19" y1="12" y2="12" />
+            </svg>
+          ),
+          refresh: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M8 16H3v5" />
+            </svg>
+          ),
+          rotateCcw: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+          ),
+          sun: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2" />
+              <path d="M12 20v2" />
+              <path d="m4.93 4.93 1.41 1.41" />
+              <path d="m17.66 17.66 1.41 1.41" />
+              <path d="M2 12h2" />
+              <path d="M20 12h2" />
+              <path d="m6.34 17.66-1.41 1.41" />
+              <path d="m19.07 4.93-1.41 1.41" />
+            </svg>
+          ),
+          moon: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+            </svg>
+          ),
+          shieldAlert: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
+              <line x1="12" x2="12" y1="8" y2="12" />
+              <line x1="12" x2="12.01" y1="16" y2="16" />
+            </svg>
+          ),
+          split: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect width="18" height="18" x="3" y="3" rx="2" />
+              <line x1="12" x2="12" y1="3" y2="21" />
+            </svg>
+          ),
+          stethoscope: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.2.2 0 1 0 .3.3" />
+              <path d="M8 15v1a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6v-4" />
+              <circle cx="20" cy="10" r="2" />
+            </svg>
+          ),
+          tv: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect width="20" height="15" x="2" y="7" rx="2" ry="2" />
+              <polyline points="17 2 12 7 7 2" />
+            </svg>
+          ),
+          userCheck: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <polyline points="16 11 18 13 22 9" />
+            </svg>
+          ),
+          userX: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <line x1="17" x2="22" y1="8" y2="13" />
+              <line x1="22" x2="17" y1="8" y2="13" />
+            </svg>
+          ),
+          users: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+            </svg>
+          ),
+          x: (
+            <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" x2="6" y1="6" y2="18" />
+              <line x1="6" x2="18" y1="6" y2="18" />
+            </svg>
+          )
+        };
+        return icons[name] || null;
+      }
+
+      // ============================================================================
+      // 2. DOMAIN SERVICE LAYER (EWMA Queue Engine, Geo Check-In & SMS Gateway)
+      // ============================================================================
+      const QueueService = {
+        calculateEWMA(durations, fallback) {
+          if (!Array.isArray(durations) || durations.length === 0) return fallback;
+          const recent = durations.slice(-5);
+          let ewma = recent[0];
+          for (let i = 1; i < recent.length; i++) {
+            ewma = EWMA_ALPHA * recent[i] + (1 - EWMA_ALPHA) * ewma;
+          }
+          return Math.max(1, Math.round(ewma));
+        },
+
+        getDistanceMeters(lat1, lon1, lat2, lon2) {
+          const R = 6371e3;
+          const toRad = (deg) => (deg * Math.PI) / 180;
+          const dLat = toRad(lat2 - lat1);
+          const dLon = toRad(lon2 - lon1);
+          const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) *
+              Math.cos(toRad(lat2)) *
+              Math.sin(dLon / 2) *
+              Math.sin(dLon / 2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+          return Math.round(R * c);
+        },
+
+        normalizeDoctorShifts(doc) {
+          const validShifts = Array.isArray(doc.shifts)
+            ? doc.shifts.filter((s) => DEFAULT_SHIFTS.includes(s))
+            : [];
+          return {
+            ...doc,
+            shifts: validShifts.length > 0 ? validShifts : ['Morning']
+          };
+        },
+
+        sortWaitingQueue(list) {
+          return [...list].sort(
+            (a, b) =>
+              (b.is_emergency ? 1 : 0) - (a.is_emergency ? 1 : 0) ||
+              a.token_number - b.token_number
+          );
+        },
+
+        buildEnrichedDoctors(rawDoctors, tokens, clinics = SEED_CLINICS) {
+          return rawDoctors.map((rawDoc) => {
+            const doc = this.normalizeDoctorShifts(rawDoc);
+            const clinic = clinics.find((c) => c.id === doc.clinic_id) || clinics[0];
+            const docTokens = tokens.filter((t) => t.doctor_id === doc.id);
+            const activeToken = docTokens.find((t) => t.state === 'Active') || null;
+            const waitingTokens = this.sortWaitingQueue(
+              docTokens.filter((t) => t.state === 'Waiting')
+            );
+            const nextToken = waitingTokens[0] || null;
+            const dynamicAvg = this.calculateEWMA(doc.recent_durations, doc.base_avg_mins);
+
+            return {
+              ...doc,
+              clinic_name: clinic.name,
+              clinic_address: clinic.address,
+              clinic_lat: clinic.lat,
+              clinic_lng: clinic.lng,
+              dynamic_avg_mins: dynamicAvg,
+              active_token: activeToken,
+              next_token: nextToken,
+              waiting_count: waitingTokens.length
+            };
+          });
+        },
+
+        buildEnrichedTokens(tokens, enrichedDoctors) {
+          return tokens.map((token) => {
+            const doc =
+              enrichedDoctors.find((d) => d.id === token.doctor_id) || enrichedDoctors[0];
+            const sameQueue = tokens.filter(
+              (t) => t.doctor_id === token.doctor_id && t.shift === token.shift
+            );
+            const activeToken = sameQueue.find((t) => t.state === 'Active');
+            const waitingOrdered = this.sortWaitingQueue(
+              sameQueue.filter((t) => t.state === 'Waiting')
+            );
+
+            let patientsAhead = 0;
+            if (token.state === 'Waiting') {
+              const idx = waitingOrdered.findIndex((t) => t.id === token.id);
+              const activeAhead = activeToken ? 1 : 0;
+              patientsAhead = idx >= 0 ? idx + activeAhead : 0;
+            }
+
+            const avgMins = doc ? doc.dynamic_avg_mins : 12;
+            const delayMins = doc ? doc.offset_delay_mins : 0;
+            const estimatedWaitMins =
+              token.state === 'Waiting'
+                ? Math.max(0, patientsAhead * avgMins + delayMins)
+                : 0;
+
+            const amberAlert =
+              token.state === 'Waiting' && patientsAhead > 0 && patientsAhead <= 2;
+
+            return {
+              ...token,
+              doctor_name: doc ? doc.name : 'Assigned Physician',
+              specialty: doc ? doc.specialty : 'General Medicine',
+              clinic_name: doc ? doc.clinic_name : 'Clinic Branch',
+              clinic_lat: doc ? doc.clinic_lat : 17.4126,
+              clinic_lng: doc ? doc.clinic_lng : 78.4392,
+              doctor_status: doc ? doc.status : 'In Consultation',
+              active_token_number: activeToken ? activeToken.token_number : null,
+              patients_ahead: patientsAhead,
+              estimated_wait_mins: estimatedWaitMins,
+              amber_alert: amberAlert
+            };
+          });
+        },
+
+        appendProximitySmsLogs(nextDoctors, nextTokens, existingLogs, clinics = SEED_CLINICS) {
+          const newLogs = [...existingLogs];
+          const updatedTokens = nextTokens.map((tok) => {
+            if (tok.state !== 'Waiting' || tok.sms_sent) return tok;
+            const doc = nextDoctors.find((d) => d.id === tok.doctor_id);
+            if (!doc) return tok;
+            const clinic = clinics.find((c) => c.id === doc.clinic_id) || clinics[0];
+            const sameQueue = nextTokens.filter(
+              (t) => t.doctor_id === tok.doctor_id && t.shift === tok.shift
+            );
+            const activeToken = sameQueue.find((t) => t.state === 'Active');
+            const waitingOrdered = this.sortWaitingQueue(
+              sameQueue.filter((t) => t.state === 'Waiting')
+            );
+            const idx = waitingOrdered.findIndex((t) => t.id === tok.id);
+            const patientsAhead = idx >= 0 ? idx + (activeToken ? 1 : 0) : 0;
+            const avgMins = this.calculateEWMA(doc.recent_durations, doc.base_avg_mins);
+            const estWait = Math.max(
+              0,
+              patientsAhead * avgMins + (doc.offset_delay_mins || 0)
+            );
+
+            if (patientsAhead > 0 && patientsAhead <= 2) {
+              newLogs.unshift({
+                id: `${Date.now()}-${tok.id}-${Math.random().toString(36).slice(2, 6)}`,
+                time: new Date().toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit'
+                }),
+                patient_name: tok.patient_name,
+                phone: tok.patient_phone,
+                message: `DocDash Alert: Token #${tok.token_number} for ${doc.name} is ${patientsAhead} patient(s) away (Est. ${estWait} mins). Please arrive at ${clinic.name} now!`
+              });
+              return { ...tok, sms_sent: true };
+            }
+            return tok;
+          });
+
+          return { updatedTokens, updatedLogs: newLogs.slice(0, 20) };
+        }
+      };
+
+      // ============================================================================
+      // 3. STATE PERSISTENCE & CROSS-TAB SYNC ENGINE (LocalStorage + BroadcastChannel)
+      // ============================================================================
+      const SyncBus = {
+        createSeedState() {
+          return {
+            doctors: JSON.parse(JSON.stringify(SEED_DOCTORS)),
+            tokens: JSON.parse(JSON.stringify(SEED_TOKENS)),
+            smsLogs: [],
+            nextTokenId: 201,
+            nextDoctorId: 9
+          };
+        },
+
+        loadInitialState() {
+          try {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) {
+              const parsed = JSON.parse(saved);
+              return {
+                doctors: (parsed.doctors || SEED_DOCTORS).map((d) =>
+                  QueueService.normalizeDoctorShifts(d)
+                ),
+                tokens: parsed.tokens || SEED_TOKENS,
+                smsLogs: parsed.smsLogs || [],
+                nextTokenId: parsed.nextTokenId || 201,
+                nextDoctorId: parsed.nextDoctorId || 9
+              };
+            }
+          } catch (e) {
+            console.warn('Could not read localStorage:', e);
+          }
+          return SyncBus.createSeedState();
+        },
+
+        persistAndBroadcast(nextState) {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
+          } catch (e) {
+            console.warn('Could not write localStorage:', e);
+          }
+          try {
+            if (typeof BroadcastChannel !== 'undefined') {
+              const bc = new BroadcastChannel(CHANNEL_NAME);
+              bc.postMessage({ type: 'STATE_UPDATE', payload: nextState });
+              bc.close();
+            }
+          } catch (e) {
+            // Ignore sandboxed frame restrictions
+          }
+        },
+
+        subscribe(onRemoteState) {
+          const onStorage = (e) => {
+            if (e.key === STORAGE_KEY && e.newValue) {
+              try {
+                onRemoteState(JSON.parse(e.newValue));
+              } catch (err) {
+                console.warn('Failed to parse storage event:', err);
+              }
+            }
+          };
+          window.addEventListener('storage', onStorage);
+
+          let bc = null;
+          try {
+            if (typeof BroadcastChannel !== 'undefined') {
+              bc = new BroadcastChannel(CHANNEL_NAME);
+              bc.onmessage = (event) => {
+                if (event.data && event.data.type === 'STATE_UPDATE' && event.data.payload) {
+                  onRemoteState(event.data.payload);
+                }
+              };
+            }
+          } catch (e) {
+            // Ignore if BroadcastChannel is unavailable
+          }
+
+          return () => {
+            window.removeEventListener('storage', onStorage);
+            if (bc) bc.close();
+          };
+        }
+      };
+
+      // ============================================================================
+      // 4. THEME CONTROLLER (System/Saved Detection + DOM & Storage Sync)
+      // ============================================================================
+      const ThemeController = {
+        getInitialTheme() {
+          try {
+            const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+            if (savedTheme === 'dark' || savedTheme === 'light') {
+              return savedTheme;
+            }
+            if (
+              typeof window !== 'undefined' &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches
+            ) {
+              return 'dark';
+            }
+          } catch (err) {
+            console.warn('Could not read initial theme preference:', err);
+          }
+          return 'light';
+        },
+
+        applyTheme(theme) {
+          const isDark = theme === 'dark';
+          try {
+            localStorage.setItem(THEME_STORAGE_KEY, theme);
+          } catch (err) {
+            console.warn('Could not persist theme preference:', err);
+          }
+          if (typeof document !== 'undefined') {
+            document.documentElement.classList.toggle('dark', isDark);
+            document.body.className = isDark
+              ? 'bg-slate-950 text-slate-100 font-sans antialiased'
+              : 'bg-slate-50 text-slate-900 font-sans antialiased';
+          }
+        },
+
+        getTokens(isDark) {
+          return {
+            isDark,
+            surfaceCard: isDark
+              ? 'bg-slate-900 border-slate-800 text-slate-100'
+              : 'bg-white border-slate-200 text-slate-900',
+            subtleText: isDark ? 'text-slate-400' : 'text-slate-500',
+            inputStyle: isDark
+              ? 'border-slate-700 bg-slate-800 text-slate-100 placeholder-slate-400 focus:border-teal-400'
+              : 'border-slate-300 bg-white text-slate-900 placeholder-slate-400 focus:border-teal-500',
+            statusBadge(status) {
+              if (status === 'In Consultation') {
+                return isDark
+                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800'
+                  : 'bg-emerald-100 text-emerald-800 border-emerald-200';
+              }
+              if (status === 'On Break') {
+                return isDark
+                  ? 'bg-amber-950/80 text-amber-300 border-amber-800'
+                  : 'bg-amber-100 text-amber-800 border-amber-200';
+              }
+              return isDark
+                ? 'bg-rose-950/80 text-rose-300 border-rose-800'
+                : 'bg-rose-100 text-rose-800 border-rose-200';
+            }
+          };
+        }
+      };
+
+      // ============================================================================
+      // 5. CUSTOM INFRASTRUCTURE HOOKS (useClinicStore & useThemeController)
+      // ============================================================================
+      function useThemeController() {
+        const [theme, setTheme] = useState(ThemeController.getInitialTheme);
+        const isDark = theme === 'dark';
+
+        useEffect(() => {
+          ThemeController.applyTheme(theme);
+        }, [theme]);
+
+        const toggleTheme = () => {
+          setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+        };
+
+        const ui = useMemo(() => ThemeController.getTokens(isDark), [isDark]);
+        return { theme, isDark, toggleTheme, ui };
+      }
+
+      function useClinicStore() {
+        const [store, setStore] = useState(SyncBus.loadInitialState);
+        const storeRef = useRef(store);
+        storeRef.current = store;
+
+        const commitStore = (updater) => {
+          setStore((prev) => {
+            const next = typeof updater === 'function' ? updater(prev) : updater;
+            SyncBus.persistAndBroadcast(next);
+            return next;
+          });
+        };
+
+        useEffect(() => SyncBus.subscribe(setStore), []);
+
+        const enrichedDoctors = useMemo(
+          () => QueueService.buildEnrichedDoctors(store.doctors, store.tokens, SEED_CLINICS),
+          [store.doctors, store.tokens]
+        );
+
+        const enrichedTokens = useMemo(
+          () => QueueService.buildEnrichedTokens(store.tokens, enrichedDoctors),
+          [store.tokens, enrichedDoctors]
+        );
+
+        const bookToken = ({ doctorId, shift, patientName, patientPhone }) => {
+          const targetDoc =
+            storeRef.current.doctors.find((d) => d.id === Number(doctorId)) ||
+            SEED_DOCTORS[0];
+          const allowedShifts = QueueService.normalizeDoctorShifts(targetDoc).shifts;
+          const chosenShift = allowedShifts.includes(shift) ? shift : allowedShifts[0];
+          const createdId = storeRef.current.nextTokenId;
+
+          commitStore((prev) => {
+            const shiftTokens = prev.tokens.filter(
+              (t) => t.doctor_id === targetDoc.id && t.shift === chosenShift
+            );
+            const nextTokenNum =
+              shiftTokens.reduce((max, t) => Math.max(max, t.token_number), 0) + 1;
+
+            const newToken = {
+              id: createdId,
+              doctor_id: targetDoc.id,
+              shift: chosenShift,
+              token_number: nextTokenNum,
+              patient_name: patientName.trim(),
+              patient_phone: patientPhone.trim() || '+91-9800000000',
+              state: 'Waiting',
+              is_emergency: false,
+              checked_in: false,
+              sms_sent: false,
+              prescription: '',
+              created_at: new Date().toISOString()
+            };
+
+            const { updatedTokens, updatedLogs } = QueueService.appendProximitySmsLogs(
+              prev.doctors,
+              [...prev.tokens, newToken],
+              prev.smsLogs,
+              SEED_CLINICS
+            );
+
+            return {
+              ...prev,
+              tokens: updatedTokens,
+              smsLogs: updatedLogs,
+              nextTokenId: prev.nextTokenId + 1
+            };
+          });
+
+          return createdId;
+        };
+
+        const callNextPatient = (doctorId) => {
+          commitStore((prev) => {
+            const doctorsCopy = prev.doctors.map((d) => ({ ...d }));
+            const doc = doctorsCopy.find((d) => d.id === Number(doctorId));
+            if (!doc) return prev;
+
+            const tokensCopy = prev.tokens.map((t) => ({ ...t }));
+            const currentActive = tokensCopy.find(
+              (t) => t.doctor_id === doc.id && t.state === 'Active'
+            );
+            if (currentActive) {
+              currentActive.state = 'Completed';
+              currentActive.completed_at = new Date().toISOString();
+              const simulatedDuration = Math.max(
+                5,
+                doc.base_avg_mins + Math.floor(Math.random() * 5) - 2
+              );
+              doc.recent_durations = [...(doc.recent_durations || []), simulatedDuration];
+            }
+
+            const nextWaiting = QueueService.sortWaitingQueue(
+              tokensCopy.filter((t) => t.doctor_id === doc.id && t.state === 'Waiting')
+            )[0];
+
+            if (nextWaiting) {
+              nextWaiting.state = 'Active';
+              nextWaiting.started_at = new Date().toISOString();
+              doc.status = 'In Consultation';
+            }
+
+            const { updatedTokens, updatedLogs } = QueueService.appendProximitySmsLogs(
+              doctorsCopy,
+              tokensCopy,
+              prev.smsLogs,
+              SEED_CLINICS
+            );
+
+            return {
+              ...prev,
+              doctors: doctorsCopy,
+              tokens: updatedTokens,
+              smsLogs: updatedLogs
+            };
+          });
+        };
+
+        const skipAbsentPatient = (doctorId) => {
+          commitStore((prev) => {
+            const doctorsCopy = prev.doctors.map((d) => ({ ...d }));
+            const doc = doctorsCopy.find((d) => d.id === Number(doctorId));
+            if (!doc) return prev;
+
+            const tokensCopy = prev.tokens.map((t) => ({ ...t }));
+            const currentActive = tokensCopy.find(
+              (t) => t.doctor_id === doc.id && t.state === 'Active'
+            );
+            if (currentActive) {
+              currentActive.state = 'Absent';
+            }
+
+            const nextWaiting = QueueService.sortWaitingQueue(
+              tokensCopy.filter((t) => t.doctor_id === doc.id && t.state === 'Waiting')
+            )[0];
+
+            if (nextWaiting) {
+              nextWaiting.state = 'Active';
+              nextWaiting.started_at = new Date().toISOString();
+            }
+
+            const { updatedTokens, updatedLogs } = QueueService.appendProximitySmsLogs(
+              doctorsCopy,
+              tokensCopy,
+              prev.smsLogs,
+              SEED_CLINICS
+            );
+
+            return {
+              ...prev,
+              doctors: doctorsCopy,
+              tokens: updatedTokens,
+              smsLogs: updatedLogs
+            };
+          });
+        };
+
+        const requeueAbsent = (tokenId) => {
+          commitStore((prev) => {
+            const tokensCopy = prev.tokens.map((t) =>
+              t.id === tokenId ? { ...t, state: 'Waiting', sms_sent: false } : t
+            );
+            const { updatedTokens, updatedLogs } = QueueService.appendProximitySmsLogs(
+              prev.doctors,
+              tokensCopy,
+              prev.smsLogs,
+              SEED_CLINICS
+            );
+            return {
+              ...prev,
+              tokens: updatedTokens,
+              smsLogs: updatedLogs
+            };
+          });
+        };
+
+        const updateDoctorStatusOrDelay = (doctorId, { status, addDelayMins = 0 }) => {
+          commitStore((prev) => ({
+            ...prev,
+            doctors: prev.doctors.map((d) => {
+              if (d.id !== Number(doctorId)) return d;
+              const nextDelay = Math.max(0, (d.offset_delay_mins || 0) + addDelayMins);
+              return {
+                ...d,
+                status: addDelayMins > 0 ? 'Delayed' : status || d.status,
+                offset_delay_mins: nextDelay
+              };
+            })
+          }));
+        };
+
+        const savePrescription = (tokenId, noteText) => {
+          const trimmed = noteText.trim();
+          if (!trimmed) return false;
+          commitStore((prev) => ({
+            ...prev,
+            tokens: prev.tokens.map((t) =>
+              t.id === tokenId ? { ...t, prescription: trimmed } : t
+            )
+          }));
+          return true;
+        };
+
+        const injectEmergencyToken = ({ doctorId, shift, patientName }) => {
+          commitStore((prev) => {
+            const doctorsCopy = prev.doctors.map((d) => ({ ...d }));
+            const doc = doctorsCopy.find((d) => d.id === Number(doctorId));
+            if (!doc) return prev;
+
+            const shiftTokens = prev.tokens.filter(
+              (t) => t.doctor_id === doc.id && t.shift === shift
+            );
+            const maxTokenNum = shiftTokens.reduce(
+              (max, t) => Math.max(max, t.token_number),
+              0
+            );
+
+            const urgentToken = {
+              id: prev.nextTokenId,
+              doctor_id: doc.id,
+              shift,
+              token_number: maxTokenNum + 1,
+              patient_name: `[EMERGENCY] ${patientName.trim()}`,
+              patient_phone: '+91-9110000911',
+              state: 'Waiting',
+              is_emergency: true,
+              checked_in: true,
+              sms_sent: false,
+              prescription: '',
+              created_at: new Date().toISOString()
+            };
+
+            doc.offset_delay_mins = (doc.offset_delay_mins || 0) + 5;
+
+            const { updatedTokens, updatedLogs } = QueueService.appendProximitySmsLogs(
+              doctorsCopy,
+              [...prev.tokens, urgentToken],
+              prev.smsLogs,
+              SEED_CLINICS
+            );
+
+            return {
+              ...prev,
+              doctors: doctorsCopy,
+              tokens: updatedTokens,
+              smsLogs: updatedLogs,
+              nextTokenId: prev.nextTokenId + 1
+            };
+          });
+        };
+
+        const upsertDoctorProfile = (editingId, formValues) => {
+          const normalizedShifts =
+            formValues.shifts.length > 0 ? formValues.shifts : ['Morning'];
+
+          if (editingId !== null) {
+            commitStore((prev) => ({
+              ...prev,
+              doctors: prev.doctors.map((d) =>
+                d.id === editingId
+                  ? {
+                      ...d,
+                      name: formValues.name.trim(),
+                      specialty: formValues.specialty,
+                      qualification: formValues.qualification.trim() || 'MBBS, MD',
+                      clinic_id: Number(formValues.clinic_id),
+                      fee: Math.max(100, Number(formValues.fee) || 500),
+                      base_avg_mins: Math.max(
+                        5,
+                        Math.min(45, Number(formValues.base_avg_mins) || 12)
+                      ),
+                      status: formValues.status,
+                      shifts: normalizedShifts
+                    }
+                  : d
+              )
+            }));
+            return {
+              createdId: editingId,
+              message: `Updated ${formValues.name.trim()} and shift schedule (${normalizedShifts.join(' & ')}).`
+            };
+          }
+
+          const createdDocId = storeRef.current.nextDoctorId || 9;
+          commitStore((prev) => {
+            const avgMins = Math.max(
+              5,
+              Math.min(45, Number(formValues.base_avg_mins) || 12)
+            );
+            const newDoctor = {
+              id: createdDocId,
+              clinic_id: Number(formValues.clinic_id),
+              name: formValues.name.trim(),
+              specialty: formValues.specialty,
+              qualification: formValues.qualification.trim() || 'MBBS, MD',
+              fee: Math.max(100, Number(formValues.fee) || 500),
+              base_avg_mins: avgMins,
+              recent_durations: [avgMins, avgMins, avgMins],
+              status: formValues.status,
+              offset_delay_mins: 0,
+              shifts: normalizedShifts
+            };
+            return {
+              ...prev,
+              doctors: [...prev.doctors, newDoctor],
+              nextDoctorId: createdDocId + 1
+            };
+          });
+
+          return {
+            createdId: createdDocId,
+            message: `Added ${formValues.name.trim()} with ${normalizedShifts.join(' & ')} shift coverage.`
+          };
+        };
+
+        const toggleDoctorShift = (docId, shiftName) => {
+          commitStore((prev) => ({
+            ...prev,
+            doctors: prev.doctors.map((d) => {
+              if (d.id !== docId) return d;
+              const current = QueueService.normalizeDoctorShifts(d).shifts;
+              const hasShift = current.includes(shiftName);
+              if (hasShift && current.length === 1) return d;
+              const nextShifts = hasShift
+                ? current.filter((s) => s !== shiftName)
+                : [...current, shiftName];
+              return { ...d, shifts: nextShifts };
+            })
+          }));
+        };
+
+        const markTokenCheckedIn = (tokenId) => {
+          commitStore((prev) => ({
+            ...prev,
+            tokens: prev.tokens.map((t) =>
+              t.id === tokenId ? { ...t, checked_in: true } : t
+            )
+          }));
+        };
+
+        const resetDemoState = () => {
+          const fresh = SyncBus.createSeedState();
+          commitStore(fresh);
+          return fresh;
+        };
+
+        return {
+          store,
+          enrichedDoctors,
+          enrichedTokens,
+          bookToken,
+          callNextPatient,
+          skipAbsentPatient,
+          requeueAbsent,
+          updateDoctorStatusOrDelay,
+          savePrescription,
+          injectEmergencyToken,
+          upsertDoctorProfile,
+          toggleDoctorShift,
+          markTokenCheckedIn,
+          resetDemoState
+        };
+      }
+
+      // ============================================================================
+      // 6. VIEW MODULES (Header, Patient Tracker, Doctor Console, Shifts & Booking)
+      // ============================================================================
+      function TopPortalHeader({
+        activePortal,
+        setActivePortal,
+        patientTab,
+        setPatientTab,
+        doctorTab,
+        setDoctorTab,
+        consoleDoctor,
+        isDark,
+        toggleTheme,
+        onResetDemo
+      }) {
+        const isDoctorWorkspace = activePortal === 'doctor_portal';
+
+        return (
+          <header
+            className={`shadow-md sticky top-0 z-30 border-b ${
+              isDark
+                ? 'bg-slate-900 text-white border-slate-800'
+                : 'bg-slate-900 text-white border-slate-800'
+            }`}
+          >
+            <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`${
+                    isDoctorWorkspace ? 'bg-indigo-500' : 'bg-teal-500'
+                  } p-2 rounded-xl shadow-sm transition-colors`}
+                >
+                  <Icon name="activity" className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h1 className="font-extrabold text-lg tracking-tight leading-none">
+                      DocDash{' '}
+                      <span className={isDoctorWorkspace ? 'text-indigo-400' : 'text-teal-400'}>
+                        QueueZero
+                      </span>
+                    </h1>
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live Sync
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {isDoctorWorkspace
+                      ? 'Dedicated Physician Portal • Consultation, Shifts & Triage'
+                      : 'Patient & Clinic Portal • Live Virtual Queue & Booking'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 bg-slate-800 p-1 rounded-xl border border-slate-700/80">
+                <button
+                  onClick={() => setActivePortal('patient_portal')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold flex items-center gap-1.5 transition ${
+                    activePortal === 'patient_portal'
+                      ? 'bg-teal-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon name="calendar" className="w-4 h-4" /> Patient &amp; Clinic Portal
+                </button>
+
+                <button
+                  onClick={() => setActivePortal('doctor_portal')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold flex items-center gap-1.5 transition ${
+                    activePortal === 'doctor_portal'
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon name="stethoscope" className="w-4 h-4" /> Doctor Portal
+                </button>
+
+                <button
+                  onClick={() => setActivePortal('split_demo')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition ${
+                    activePortal === 'split_demo'
+                      ? 'bg-amber-500 text-slate-950 shadow-sm'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon name="split" className="w-4 h-4" /> Split Demo
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={toggleTheme}
+                  aria-label={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                  title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                  className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-1.5 transition"
+                >
+                  <Icon
+                    name={isDark ? 'sun' : 'moon'}
+                    className={`w-3.5 h-3.5 ${isDark ? 'text-amber-300' : 'text-indigo-300'}`}
+                  />
+                  <span>{isDark ? 'Light Mode' : 'Dark Mode'}</span>
+                </button>
+
+                <button
+                  onClick={onResetDemo}
+                  className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-1.5 transition"
+                  title="Restore initial 4 clinics, 8 doctors, and 20 tokens"
+                >
+                  <Icon name="refresh" className="w-3.5 h-3.5 text-teal-400" /> Reset Demo
+                </button>
+              </div>
+            </div>
+
+            <div
+              className={`${
+                isDoctorWorkspace
+                  ? 'bg-indigo-950/90 border-t border-indigo-900/70'
+                  : 'bg-slate-800/90 border-t border-slate-800'
+              }`}
+            >
+              <div className="max-w-7xl mx-auto px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                {activePortal === 'patient_portal' && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => setPatientTab('directory')}
+                      className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition ${
+                        patientTab === 'directory'
+                          ? 'bg-teal-600 text-white'
+                          : 'text-slate-300 hover:bg-slate-700 hover:text-white'
+                      }`}
+                    >
+                      <Icon name="users" className="w-3.5 h-3.5" /> Doctor Directory &amp; Token Tracker
+                    </button>
+                    <button
+                      onClick={() => setPatientTab('board')}
+                      className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition ${
+                        patientTab === 'board'
+                          ? 'bg-teal-600 text-white'
+                          : 'text-slate-300 hover:bg-slate-700 hover:text-white'
+                      }`}
+                    >
+                      <Icon name="tv" className="w-3.5 h-3.5" /> Waiting Room Board
+                    </button>
+                    <button
+                      onClick={() => setPatientTab('heatmap')}
+                      className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition ${
+                        patientTab === 'heatmap'
+                          ? 'bg-teal-600 text-white'
+                          : 'text-slate-300 hover:bg-slate-700 hover:text-white'
+                      }`}
+                    >
+                      <Icon name="clock" className="w-3.5 h-3.5" /> Wait-Time Heatmap
+                    </button>
+                  </div>
+                )}
+
+                {activePortal === 'doctor_portal' && consoleDoctor && (
+                  <div className="flex flex-wrap items-center justify-between w-full gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => setDoctorTab('consultation')}
+                        className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition ${
+                          doctorTab === 'consultation'
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-indigo-200 hover:bg-indigo-900 hover:text-white'
+                        }`}
+                      >
+                        <Icon name="userCheck" className="w-3.5 h-3.5" /> Consultation Console
+                      </button>
+                      <button
+                        onClick={() => setDoctorTab('roster_shifts')}
+                        className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 transition ${
+                          doctorTab === 'roster_shifts'
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-indigo-200 hover:bg-indigo-900 hover:text-white'
+                        }`}
+                      >
+                        <Icon name="stethoscope" className="w-3.5 h-3.5" /> Doctor &amp; Shift Manager
+                      </button>
+                    </div>
+                    <div className="text-indigo-200 font-medium">
+                      Active Doctor: <strong className="text-white">{consoleDoctor.name}</strong> ({consoleDoctor.clinic_name})
+                    </div>
+                  </div>
+                )}
+
+                {activePortal === 'split_demo' && (
+                  <div className="text-amber-200 font-medium">
+                    Side-by-Side Live Demo: Patient Queue Tracker on the left, Physician Consultation Console on the right.
+                  </div>
+                )}
+              </div>
+            </div>
+          </header>
+        );
+      }
+
+      function PatientTrackerPanel({
+        enrichedTokens,
+        trackedToken,
+        setTrackedTokenId,
+        smsLogs,
+        onMarkCheckedIn,
+        ui
+      }) {
+        const [geoStatus, setGeoStatus] = useState({ type: '', text: '' });
+        const { isDark, surfaceCard, subtleText } = ui;
+
+        const handleGeoCheckIn = (token, simulateWithinRange = false) => {
+          setGeoStatus({ type: 'info', text: 'Checking distance to clinic...' });
+
+          const verifyCoords = (lat, lng, isSimulated = false) => {
+            const distanceMeters = isSimulated
+              ? 120
+              : QueueService.getDistanceMeters(lat, lng, token.clinic_lat, token.clinic_lng);
+
+            if (distanceMeters <= MAX_CHECKIN_RADIUS_METERS) {
+              onMarkCheckedIn(token.id);
+              setGeoStatus({
+                type: 'success',
+                text: `Checked in! Verified ${distanceMeters}m from ${token.clinic_name} (within 500m).`
+              });
+            } else {
+              setGeoStatus({
+                type: 'error',
+                text: `You are ${distanceMeters}m away from ${token.clinic_name}. Move within 500m to check in.`
+              });
+            }
+          };
+
+          if (simulateWithinRange) {
+            verifyCoords(token.clinic_lat, token.clinic_lng, true);
+            return;
+          }
+
+          if (typeof navigator === 'undefined' || !navigator.geolocation) {
+            setGeoStatus({
+              type: 'error',
+              text: 'Geolocation unavailable. Use "Simulate <500m Arrival" for demo.'
+            });
+            return;
+          }
+
+          navigator.geolocation.getCurrentPosition(
+            (position) => {
+              verifyCoords(position.coords.latitude, position.coords.longitude, false);
+            },
+            () => {
+              setGeoStatus({
+                type: 'error',
+                text: 'Location permission denied. Use "Simulate <500m Arrival" for demo.'
+              });
+            }
+          );
+        };
+
+        return (
+          <div className="space-y-5">
+            <div className={`p-5 rounded-2xl shadow-sm border ${surfaceCard}`}>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <h2 className="font-bold text-base flex items-center gap-2">
+                  <Icon name="bell" className="w-4 h-4 text-teal-500" /> My Live Token Tracker
+                </h2>
+                <select
+                  value={trackedToken ? trackedToken.id : ''}
+                  onChange={(e) => {
+                    setTrackedTokenId(Number(e.target.value));
+                    setGeoStatus({ type: '', text: '' });
+                  }}
+                  className={`text-xs border rounded-lg px-2 py-1.5 max-w-[190px] ${
+                    isDark
+                      ? 'border-slate-700 bg-slate-800 text-slate-200'
+                      : 'border-slate-300 bg-slate-50 text-slate-800'
+                  }`}
+                >
+                  {enrichedTokens.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      Token #{t.token_number} • {t.patient_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {trackedToken && (
+                <div className="space-y-4">
+                  {trackedToken.amber_alert && (
+                    <div
+                      className={`border-l-4 border-amber-500 p-3.5 rounded-r-xl animate-pulse ${
+                        isDark ? 'bg-amber-950/60 text-amber-200' : 'bg-amber-50 text-amber-950'
+                      }`}
+                    >
+                      <p
+                        className={`text-[11px] font-extrabold uppercase tracking-wider ${
+                          isDark ? 'text-amber-300' : 'text-amber-800'
+                        }`}
+                      >
+                        Proximity Alert • {trackedToken.patients_ahead} Patients Ahead
+                      </p>
+                      <p className="text-sm font-bold mt-0.5">
+                        Please arrive at the clinic now! Your turn is coming up soon.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="bg-slate-900 text-white rounded-xl p-4 border border-slate-800">
+                    <div className="flex justify-between items-start gap-2">
+                      <div>
+                        <span className="text-[11px] uppercase tracking-wider text-slate-400 block">
+                          Your Token
+                        </span>
+                        <span className="text-4xl font-black text-teal-400 block">
+                          #{trackedToken.token_number}
+                        </span>
+                        <span className="text-xs text-slate-300 font-medium block mt-0.5">
+                          {trackedToken.patient_name}
+                        </span>
+                      </div>
+
+                      <div className="text-right">
+                        <span className="text-[11px] uppercase tracking-wider text-slate-400 block">
+                          Currently Serving
+                        </span>
+                        <span className="text-2xl font-extrabold text-white block">
+                          {trackedToken.active_token_number
+                            ? `#${trackedToken.active_token_number}`
+                            : '—'}
+                        </span>
+                        <span className="inline-block mt-1 text-[11px] font-semibold px-2 py-0.5 rounded bg-slate-800 text-teal-300">
+                          {trackedToken.state}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-800 grid grid-cols-2 gap-2.5 text-center">
+                      <div className="bg-slate-800/90 p-2.5 rounded-lg">
+                        <span className="text-[11px] text-slate-400 block">Patients Ahead</span>
+                        <span className="text-xl font-black text-white">
+                          {trackedToken.patients_ahead}
+                        </span>
+                      </div>
+                      <div className="bg-slate-800/90 p-2.5 rounded-lg">
+                        <span className="text-[11px] text-slate-400 block">Est. Wait Time</span>
+                        <span className="text-xl font-black text-amber-400">
+                          {trackedToken.estimated_wait_mins} mins
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 text-[11px] text-slate-400 flex justify-between gap-2">
+                      <span>
+                        {trackedToken.doctor_name} ({trackedToken.specialty})
+                      </span>
+                      <span>{trackedToken.shift} Shift</span>
+                    </div>
+                  </div>
+
+                  <div
+                    className={`border rounded-xl p-3.5 ${
+                      isDark ? 'bg-slate-800/70 border-slate-700' : 'bg-slate-50 border-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={`text-xs font-semibold flex items-center gap-1.5 ${
+                          isDark ? 'text-slate-200' : 'text-slate-700'
+                        }`}
+                      >
+                        <Icon name="navigation" className="w-3.5 h-3.5 text-teal-500" /> Virtual Check-In (500m Radius)
+                      </span>
+                      {trackedToken.checked_in ? (
+                        <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-2.5 py-0.5 rounded-full">
+                          Checked In ✓
+                        </span>
+                      ) : (
+                        <span className={`text-xs ${subtleText}`}>Remote / En Route</span>
+                      )}
+                    </div>
+
+                    {!trackedToken.checked_in && (
+                      <div className="mt-2.5 flex gap-2">
+                        <button
+                          onClick={() => handleGeoCheckIn(trackedToken, false)}
+                          className={`flex-1 text-xs border py-2 px-2.5 rounded-lg font-semibold transition ${
+                            isDark
+                              ? 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-200'
+                              : 'bg-white border-slate-300 hover:bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          Verify GPS
+                        </button>
+                        <button
+                          onClick={() => handleGeoCheckIn(trackedToken, true)}
+                          className="flex-1 text-xs bg-teal-600 text-white hover:bg-teal-700 py-2 px-2.5 rounded-lg font-semibold transition"
+                        >
+                          Simulate &lt;500m Arrival
+                        </button>
+                      </div>
+                    )}
+
+                    {geoStatus.text && (
+                      <p
+                        className={`text-xs mt-2 font-medium ${
+                          geoStatus.type === 'success'
+                            ? isDark
+                              ? 'text-emerald-400'
+                              : 'text-emerald-700'
+                            : geoStatus.type === 'error'
+                            ? isDark
+                              ? 'text-rose-400'
+                              : 'text-rose-600'
+                            : subtleText
+                        }`}
+                      >
+                        {geoStatus.text}
+                      </p>
+                    )}
+                  </div>
+
+                  {trackedToken.prescription && (
+                    <div
+                      className={`border rounded-xl p-3.5 ${
+                        isDark
+                          ? 'bg-emerald-950/50 border-emerald-800'
+                          : 'bg-emerald-50 border-emerald-200'
+                      }`}
+                    >
+                      <p
+                        className={`text-xs font-bold flex items-center gap-1.5 ${
+                          isDark ? 'text-emerald-300' : 'text-emerald-900'
+                        }`}
+                      >
+                        <Icon name="fileText" className="w-3.5 h-3.5" /> Digital Prescription Summary
+                      </p>
+                      <p
+                        className={`text-xs mt-1.5 leading-relaxed whitespace-pre-line ${
+                          isDark ? 'text-emerald-200' : 'text-emerald-800'
+                        }`}
+                      >
+                        {trackedToken.prescription}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className={`p-5 rounded-2xl shadow-sm border ${surfaceCard}`}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-bold text-sm flex items-center gap-2">
+                  <Icon name="messageSquare" className="w-4 h-4 text-teal-500" /> SMS Notification Simulator
+                </h3>
+                <span
+                  className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                    isDark ? 'bg-slate-800 text-slate-300' : 'bg-slate-100 text-slate-600'
+                  }`}
+                >
+                  Auto-triggers at ≤2 tokens
+                </span>
+              </div>
+
+              {smsLogs.length === 0 ? (
+                <p className={`text-xs leading-relaxed ${subtleText}`}>
+                  No proximity SMS dispatched yet. Advance Dr. Mehta&apos;s queue from Token #11 to #12 to watch Token #14 trigger an instant SMS alert!
+                </p>
+              ) : (
+                <div className="space-y-2.5 max-h-56 overflow-y-auto pr-1">
+                  {smsLogs.map((sms) => (
+                    <div
+                      key={sms.id}
+                      className={`border p-2.5 rounded-xl text-xs ${
+                        isDark
+                          ? 'bg-amber-950/40 border-amber-800/70'
+                          : 'bg-amber-50/70 border-amber-200'
+                      }`}
+                    >
+                      <div
+                        className={`flex justify-between font-bold ${
+                          isDark ? 'text-amber-200' : 'text-amber-950'
+                        }`}
+                      >
+                        <span>
+                          {sms.patient_name} ({sms.phone})
+                        </span>
+                        <span
+                          className={`text-[11px] font-normal ${
+                            isDark ? 'text-amber-400' : 'text-amber-700'
+                          }`}
+                        >
+                          {sms.time}
+                        </span>
+                      </div>
+                      <p
+                        className={`mt-1 leading-snug ${
+                          isDark ? 'text-slate-300' : 'text-slate-700'
+                        }`}
+                      >
+                        {sms.message}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      function DoctorConsolePanel({
+        enrichedDoctors,
+        enrichedTokens,
+        selectedDoctorId,
+        setSelectedDoctorId,
+        onEditDoctor,
+        onUpdateStatusOrDelay,
+        onCallNext,
+        onSkipAbsent,
+        onRequeueAbsent,
+        onSavePrescription,
+        ui
+      }) {
+        const [rxInput, setRxInput] = useState('');
+        const [rxSavedNotice, setRxSavedNotice] = useState('');
+        const { isDark, surfaceCard, subtleText, inputStyle } = ui;
+
+        const consoleDoctor =
+          enrichedDoctors.find((d) => d.id === Number(selectedDoctorId)) || enrichedDoctors[0];
+        if (!consoleDoctor) return null;
+
+        const consoleTokens = enrichedTokens
+          .filter((t) => t.doctor_id === consoleDoctor.id)
+          .sort((a, b) => a.token_number - b.token_number);
+
+        const targetRxToken =
+          consoleDoctor.active_token ||
+          [...consoleTokens].reverse().find((t) => t.state === 'Completed');
+        const docShifts = QueueService.normalizeDoctorShifts(consoleDoctor).shifts;
+
+        const handleAttach = () => {
+          if (!targetRxToken || !rxInput.trim()) return;
+          const ok = onSavePrescription(targetRxToken.id, rxInput);
+          if (ok) {
+            setRxInput('');
+            setRxSavedNotice(`Prescription attached to Token #${targetRxToken.token_number}.`);
+            setTimeout(() => setRxSavedNotice(''), 3500);
+          }
+        };
+
+        return (
+          <div className="space-y-5">
+            <div className={`p-5 rounded-2xl shadow-sm border ${surfaceCard}`}>
+              <div
+                className={`flex flex-wrap items-center justify-between gap-3 pb-4 border-b ${
+                  isDark ? 'border-slate-800' : 'border-slate-200'
+                }`}
+              >
+                <div>
+                  <label className={`text-[11px] font-bold uppercase tracking-wider block mb-1 ${subtleText}`}>
+                    Signed-In Physician Profile
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={selectedDoctorId}
+                      onChange={(e) => setSelectedDoctorId(Number(e.target.value))}
+                      className={`font-bold text-sm border rounded-xl px-3 py-2 ${
+                        isDark
+                          ? 'border-slate-700 bg-slate-800 text-slate-100'
+                          : 'border-slate-300 bg-slate-50 text-slate-900'
+                      }`}
+                    >
+                      {enrichedDoctors.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name} — {d.specialty} ({d.clinic_name})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => onEditDoctor(consoleDoctor)}
+                      className={`text-xs font-semibold border px-3 py-2 rounded-xl transition ${
+                        isDark
+                          ? 'text-indigo-300 bg-indigo-950/70 hover:bg-indigo-900/70 border-indigo-800'
+                          : 'text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border-indigo-200'
+                      }`}
+                    >
+                      Edit Profile &amp; Shifts
+                    </button>
+                  </div>
+                  <div
+                    className={`flex flex-wrap items-center gap-1.5 mt-2 text-xs ${
+                      isDark ? 'text-slate-300' : 'text-slate-600'
+                    }`}
+                  >
+                    <span className={`font-semibold ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>
+                      {consoleDoctor.clinic_name}
+                    </span>
+                    <span>•</span>
+                    <span>Assigned Shifts:</span>
+                    {docShifts.map((sh) => (
+                      <span
+                        key={sh}
+                        className={`text-[11px] font-bold border px-2 py-0.5 rounded-full ${
+                          isDark
+                            ? 'bg-indigo-950/80 text-indigo-300 border-indigo-800'
+                            : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        }`}
+                      >
+                        {sh}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {['In Consultation', 'On Break', 'Delayed'].map((st) => (
+                    <button
+                      key={st}
+                      onClick={() => onUpdateStatusOrDelay(consoleDoctor.id, { status: st })}
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-lg border transition ${
+                        consoleDoctor.status === st
+                          ? isDark
+                            ? 'bg-teal-600 text-white border-teal-500'
+                            : 'bg-slate-900 text-white border-slate-900'
+                          : isDark
+                          ? 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                className={`my-4 border rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4 ${
+                  isDark
+                    ? 'bg-teal-950/40 border-teal-800/70'
+                    : 'bg-teal-50/80 border-teal-200'
+                }`}
+              >
+                <div>
+                  <span
+                    className={`text-[11px] font-extrabold uppercase tracking-wider ${
+                      isDark ? 'text-teal-300' : 'text-teal-700'
+                    }`}
+                  >
+                    Currently In Consultation
+                  </span>
+                  {consoleDoctor.active_token ? (
+                    <>
+                      <h3 className="text-2xl font-black mt-0.5">
+                        Token #{consoleDoctor.active_token.token_number} —{' '}
+                        {consoleDoctor.active_token.patient_name}
+                      </h3>
+                      <p className={`text-xs mt-0.5 ${subtleText}`}>
+                        Phone: {consoleDoctor.active_token.patient_phone} •{' '}
+                        {consoleDoctor.active_token.shift} Shift
+                      </p>
+                    </>
+                  ) : (
+                    <h3
+                      className={`text-lg font-bold mt-1 ${
+                        isDark ? 'text-slate-200' : 'text-slate-700'
+                      }`}
+                    >
+                      Cabin Empty — Click &quot;Call Next Patient&quot;
+                    </h3>
+                  )}
+                </div>
+
+                <div
+                  className={`px-3.5 py-2.5 rounded-xl border text-right ${
+                    isDark ? 'bg-slate-900 border-teal-900/70' : 'bg-white border-teal-100'
+                  }`}
+                >
+                  <span className={`text-[11px] block ${subtleText}`}>EWMA Pace &amp; Offset</span>
+                  <span className="text-sm font-extrabold">
+                    {consoleDoctor.dynamic_avg_mins}m avg • +{consoleDoctor.offset_delay_mins}m delay
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <button
+                  onClick={() => onCallNext(consoleDoctor.id)}
+                  className="bg-teal-600 hover:bg-teal-700 active:scale-[0.99] text-white font-bold text-sm py-3 px-4 rounded-xl flex items-center justify-center gap-2 shadow-sm transition"
+                >
+                  <Icon name="userCheck" className="w-4 h-4" /> Call Next Patient
+                </button>
+
+                <button
+                  onClick={() => onSkipAbsent(consoleDoctor.id)}
+                  className="bg-amber-500 hover:bg-amber-600 active:scale-[0.99] text-white font-bold text-sm py-3 px-4 rounded-xl flex items-center justify-center gap-2 shadow-sm transition"
+                >
+                  <Icon name="userX" className="w-4 h-4" /> Patient Absent (Skip)
+                </button>
+
+                <button
+                  onClick={() => onUpdateStatusOrDelay(consoleDoctor.id, { addDelayMins: 10 })}
+                  className="bg-rose-600 hover:bg-rose-700 active:scale-[0.99] text-white font-bold text-sm py-3 px-4 rounded-xl flex items-center justify-center gap-2 shadow-sm transition"
+                >
+                  <Icon name="clock" className="w-4 h-4" /> Delay +10 Mins
+                </button>
+              </div>
+
+              {targetRxToken && (
+                <div
+                  className={`mt-4 pt-4 border-t ${
+                    isDark ? 'border-slate-800' : 'border-slate-200'
+                  }`}
+                >
+                  <label
+                    className={`text-xs font-bold block mb-1.5 ${
+                      isDark ? 'text-slate-200' : 'text-slate-700'
+                    }`}
+                  >
+                    Attach Digital Prescription / Notes (Token #{targetRxToken.token_number} —{' '}
+                    {targetRxToken.patient_name})
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={rxInput}
+                      onChange={(e) => setRxInput(e.target.value)}
+                      placeholder="e.g., Tab. Aspirin 75mg OD after lunch. ECG normal. Follow up in 14 days."
+                      className={`flex-1 text-xs border rounded-xl px-3 py-2 focus:outline-none ${inputStyle}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAttach}
+                      className={`text-white text-xs font-bold px-4 py-2 rounded-xl transition ${
+                        isDark
+                          ? 'bg-indigo-600 hover:bg-indigo-500'
+                          : 'bg-slate-900 hover:bg-slate-800'
+                      }`}
+                    >
+                      Attach Rx
+                    </button>
+                  </div>
+                  {rxSavedNotice && (
+                    <p
+                      className={`text-xs font-medium mt-1.5 ${
+                        isDark ? 'text-emerald-400' : 'text-emerald-700'
+                      }`}
+                    >
+                      {rxSavedNotice}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className={`p-5 rounded-2xl shadow-sm border ${surfaceCard}`}>
+              <h3 className="font-bold text-sm mb-3 flex items-center gap-2">
+                <Icon name="users" className="w-4 h-4 text-teal-500" /> Queue Roster (
+                {consoleTokens.length} Tokens)
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr
+                      className={`border-b uppercase ${
+                        isDark
+                          ? 'border-slate-800 text-slate-400'
+                          : 'border-slate-200 text-slate-500'
+                      }`}
+                    >
+                      <th className="py-2 pr-2">Token</th>
+                      <th className="py-2 pr-2">Patient</th>
+                      <th className="py-2 pr-2">Shift</th>
+                      <th className="py-2 pr-2">Location</th>
+                      <th className="py-2 pr-2">Est. Wait</th>
+                      <th className="py-2 text-right">Status / Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-slate-100'}`}>
+                    {consoleTokens.map((t) => (
+                      <tr
+                        key={t.id}
+                        className={
+                          t.is_emergency ? (isDark ? 'bg-rose-950/40' : 'bg-rose-50/80') : ''
+                        }
+                      >
+                        <td className="py-2.5 pr-2 font-extrabold">#{t.token_number}</td>
+                        <td className="py-2.5 pr-2 font-medium">
+                          {t.patient_name}
+                          {t.is_emergency && (
+                            <span className="ml-1.5 text-[10px] font-bold bg-rose-600 text-white px-1.5 py-0.5 rounded">
+                              URGENT
+                            </span>
+                          )}
+                        </td>
+                        <td className={`py-2.5 pr-2 font-medium ${subtleText}`}>{t.shift}</td>
+                        <td className="py-2.5 pr-2">
+                          {t.checked_in ? (
+                            <span
+                              className={`font-semibold ${
+                                isDark ? 'text-emerald-400' : 'text-emerald-700'
+                              }`}
+                            >
+                              At Clinic
+                            </span>
+                          ) : (
+                            <span className={subtleText}>Remote</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 pr-2 font-semibold">
+                          {t.state === 'Waiting' ? `${t.estimated_wait_mins}m` : '—'}
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <div className="inline-flex items-center gap-1.5">
+                            <span
+                              className={`px-2 py-0.5 rounded-full font-semibold ${
+                                t.state === 'Active'
+                                  ? isDark
+                                    ? 'bg-teal-950 text-teal-300'
+                                    : 'bg-teal-100 text-teal-800'
+                                  : t.state === 'Completed'
+                                  ? isDark
+                                    ? 'bg-slate-800 text-slate-400'
+                                    : 'bg-slate-100 text-slate-600'
+                                  : t.state === 'Absent'
+                                  ? isDark
+                                    ? 'bg-amber-950 text-amber-300'
+                                    : 'bg-amber-100 text-amber-800'
+                                  : isDark
+                                  ? 'bg-slate-800 text-slate-200'
+                                  : 'bg-slate-100 text-slate-800'
+                              }`}
+                            >
+                              {t.state}
+                            </span>
+                            {t.state === 'Absent' && (
+                              <button
+                                onClick={() => onRequeueAbsent(t.id)}
+                                title="Re-queue absent patient"
+                                className={`px-1.5 py-0.5 rounded border font-semibold flex items-center gap-0.5 ${
+                                  isDark
+                                    ? 'text-teal-300 hover:text-teal-200 bg-teal-950/70 border-teal-800'
+                                    : 'text-teal-700 hover:text-teal-900 bg-teal-50 border-teal-200'
+                                }`}
+                              >
+                                <Icon name="rotateCcw" className="w-3 h-3" /> Re-queue
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      function EmergencyTriagePanel({ selectedDoctorId, onInjectEmergency, isDark }) {
+        const [emergencyName, setEmergencyName] = useState('');
+        const [emergencyShift, setEmergencyShift] = useState('Morning');
+
+        const handleSubmit = (e) => {
+          e.preventDefault();
+          if (!emergencyName.trim()) return;
+          onInjectEmergency({
+            doctorId: selectedDoctorId,
+            shift: emergencyShift,
+            patientName: emergencyName
+          });
+          setEmergencyName('');
+        };
+
+        return (
+          <div
+            className={`border p-5 rounded-2xl shadow-sm ${
+              isDark ? 'bg-rose-950/40 border-rose-800/80' : 'bg-rose-50 border-rose-200'
+            }`}
+          >
+            <h3
+              className={`font-extrabold text-base flex items-center gap-2 ${
+                isDark ? 'text-rose-200' : 'text-rose-950'
+              }`}
+            >
+              <Icon name="shieldAlert" className="w-5 h-5 text-rose-500" /> Emergency Triage Escalation
+            </h3>
+            <p
+              className={`text-xs mt-1.5 leading-relaxed ${
+                isDark ? 'text-rose-300/90' : 'text-rose-800'
+              }`}
+            >
+              Inject an urgent trauma or critical patient immediately ahead of the regular waiting queue with automatic downstream delay recalculation.
+            </p>
+
+            <form onSubmit={handleSubmit} className="mt-4 space-y-3">
+              <div>
+                <label
+                  className={`text-[11px] font-bold uppercase block mb-1 ${
+                    isDark ? 'text-rose-200' : 'text-rose-900'
+                  }`}
+                >
+                  Target Shift
+                </label>
+                <select
+                  value={emergencyShift}
+                  onChange={(e) => setEmergencyShift(e.target.value)}
+                  className={`w-full text-xs border rounded-xl px-3 py-2 font-semibold ${
+                    isDark
+                      ? 'border-rose-800 bg-slate-900 text-rose-100'
+                      : 'border-rose-300 bg-white text-rose-950'
+                  }`}
+                >
+                  <option value="Morning">Morning Shift (9 AM – 1 PM)</option>
+                  <option value="Evening">Evening Shift (5 PM – 9 PM)</option>
+                </select>
+              </div>
+              <div>
+                <label
+                  className={`text-[11px] font-bold uppercase block mb-1 ${
+                    isDark ? 'text-rose-200' : 'text-rose-900'
+                  }`}
+                >
+                  Patient / Critical Case Label
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={emergencyName}
+                  onChange={(e) => setEmergencyName(e.target.value)}
+                  placeholder="e.g., Acute Chest Pain — Triage #1"
+                  className={`w-full text-xs border rounded-xl px-3 py-2.5 focus:outline-none ${
+                    isDark
+                      ? 'border-rose-800 bg-slate-900 text-white placeholder-slate-500 focus:border-rose-500'
+                      : 'border-rose-300 bg-white text-slate-900 focus:border-rose-500'
+                  }`}
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs py-3 rounded-xl shadow-sm transition"
+              >
+                Inject Priority Token Ahead
+              </button>
+            </form>
+          </div>
+        );
+      }
+
+      const EMPTY_DOCTOR_FORM = {
+        name: '',
+        specialty: 'General Medicine',
+        qualification: 'MBBS, MD',
+        clinic_id: 1,
+        fee: 600,
+        base_avg_mins: 12,
+        status: 'In Consultation',
+        shifts: ['Morning']
+      };
+
+      function DoctorShiftManagerPanel({
+        enrichedDoctors,
+        editingDoctorId,
+        setEditingDoctorId,
+        onUpsertDoctor,
+        onToggleDoctorShift,
+        onSelectDoctorForConsole,
+        ui
+      }) {
+        const [doctorForm, setDoctorForm] = useState(EMPTY_DOCTOR_FORM);
+        const [doctorFormMessage, setDoctorFormMessage] = useState('');
+        const { isDark, surfaceCard, subtleText, inputStyle } = ui;
+
+        useEffect(() => {
+          if (editingDoctorId === null) {
+            setDoctorForm(EMPTY_DOCTOR_FORM);
+            return;
+          }
+          const target = enrichedDoctors.find((d) => d.id === editingDoctorId);
+          if (target) {
+            setDoctorForm({
+              name: target.name,
+              specialty: target.specialty,
+              qualification: target.qualification,
+              clinic_id: target.clinic_id,
+              fee: target.fee,
+              base_avg_mins: target.base_avg_mins,
+              status: target.status,
+              shifts: QueueService.normalizeDoctorShifts(target).shifts
+            });
+            setDoctorFormMessage('');
+          }
+        }, [editingDoctorId, enrichedDoctors]);
+
+        const toggleFormShift = (shiftName) => {
+          setDoctorForm((prev) => {
+            const exists = prev.shifts.includes(shiftName);
+            if (exists && prev.shifts.length === 1) return prev;
+            const nextShifts = exists
+              ? prev.shifts.filter((s) => s !== shiftName)
+              : [...prev.shifts, shiftName];
+            return { ...prev, shifts: nextShifts };
+          });
+        };
+
+        const handleSubmit = (e) => {
+          e.preventDefault();
+          if (!doctorForm.name.trim()) return;
+          const result = onUpsertDoctor(editingDoctorId, doctorForm);
+          setDoctorFormMessage(result.message);
+          if (editingDoctorId === null) {
+            setDoctorForm(EMPTY_DOCTOR_FORM);
+          }
+        };
+
+        return (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className={`lg:col-span-5 p-6 rounded-2xl shadow-sm border h-fit ${surfaceCard}`}>
+              <div
+                className={`flex items-center justify-between pb-3 border-b ${
+                  isDark ? 'border-slate-800' : 'border-slate-200'
+                }`}
+              >
+                <div>
+                  <h2 className="text-base font-extrabold flex items-center gap-2">
+                    <Icon name="plus" className="w-4 h-4 text-indigo-500" />
+                    {editingDoctorId !== null
+                      ? 'Edit Doctor & Shift Schedule'
+                      : 'Onboard New Doctor & Shifts'}
+                  </h2>
+                  <p className={`text-xs mt-0.5 ${subtleText}`}>
+                    Changes sync immediately to the Patient Directory &amp; Waiting Board
+                  </p>
+                </div>
+                {editingDoctorId !== null && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingDoctorId(null);
+                      setDoctorForm(EMPTY_DOCTOR_FORM);
+                      setDoctorFormMessage('');
+                    }}
+                    className={`text-xs font-semibold px-2.5 py-1 rounded-lg ${
+                      isDark
+                        ? 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                        : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    + New
+                  </button>
+                )}
+              </div>
+
+              <form onSubmit={handleSubmit} className="mt-4 space-y-3.5">
+                <div>
+                  <label className="text-xs font-bold block mb-1">Doctor Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={doctorForm.name}
+                    onChange={(e) => setDoctorForm({ ...doctorForm, name: e.target.value })}
+                    placeholder="e.g., Dr. Neha Gupta"
+                    className={`w-full text-sm border rounded-xl px-3 py-2 focus:outline-none ${inputStyle}`}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold block mb-1">Specialty</label>
+                    <select
+                      value={doctorForm.specialty}
+                      onChange={(e) => setDoctorForm({ ...doctorForm, specialty: e.target.value })}
+                      className={`w-full text-xs font-semibold border rounded-xl px-3 py-2 ${inputStyle}`}
+                    >
+                      {SPECIALTIES.map((sp) => (
+                        <option key={sp} value={sp}>
+                          {sp}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold block mb-1">Clinic Branch</label>
+                    <select
+                      value={doctorForm.clinic_id}
+                      onChange={(e) =>
+                        setDoctorForm({ ...doctorForm, clinic_id: Number(e.target.value) })
+                      }
+                      className={`w-full text-xs font-semibold border rounded-xl px-3 py-2 ${inputStyle}`}
+                    >
+                      {SEED_CLINICS.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs font-bold block mb-1">Qualification</label>
+                    <input
+                      type="text"
+                      value={doctorForm.qualification}
+                      onChange={(e) =>
+                        setDoctorForm({ ...doctorForm, qualification: e.target.value })
+                      }
+                      placeholder="MD, DM"
+                      className={`w-full text-xs border rounded-xl px-3 py-2 ${inputStyle}`}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold block mb-1">Fee (₹)</label>
+                    <input
+                      type="number"
+                      min="100"
+                      step="50"
+                      required
+                      value={doctorForm.fee}
+                      onChange={(e) => setDoctorForm({ ...doctorForm, fee: e.target.value })}
+                      className={`w-full text-xs border rounded-xl px-3 py-2 ${inputStyle}`}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold block mb-1">Avg Mins</label>
+                    <input
+                      type="number"
+                      min="5"
+                      max="45"
+                      required
+                      value={doctorForm.base_avg_mins}
+                      onChange={(e) =>
+                        setDoctorForm({ ...doctorForm, base_avg_mins: e.target.value })
+                      }
+                      className={`w-full text-xs border rounded-xl px-3 py-2 ${inputStyle}`}
+                    />
+                  </div>
+                </div>
+
+                <div
+                  className={`border rounded-xl p-3.5 ${
+                    isDark
+                      ? 'bg-indigo-950/40 border-indigo-800/70'
+                      : 'bg-indigo-50/70 border-indigo-200'
+                  }`}
+                >
+                  <label
+                    className={`text-xs font-bold block mb-2 ${
+                      isDark ? 'text-indigo-200' : 'text-indigo-950'
+                    }`}
+                  >
+                    Assign Outpatient Shifts (At least 1 required)
+                  </label>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {DEFAULT_SHIFTS.map((shiftName) => {
+                      const active = doctorForm.shifts.includes(shiftName);
+                      return (
+                        <button
+                          type="button"
+                          key={shiftName}
+                          onClick={() => toggleFormShift(shiftName)}
+                          className={`p-2.5 rounded-xl border text-left transition ${
+                            active
+                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                              : isDark
+                              ? 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="text-xs font-extrabold">{shiftName} Shift</div>
+                          <div
+                            className={`text-[10px] mt-0.5 ${
+                              active ? 'text-indigo-100' : subtleText
+                            }`}
+                          >
+                            {shiftName === 'Morning' ? '9 AM – 1 PM' : '5 PM – 9 PM'}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="pt-1 flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-3 rounded-xl shadow-sm transition"
+                  >
+                    {editingDoctorId !== null ? 'Save Doctor & Shift Changes' : 'Add Doctor to Portal'}
+                  </button>
+                </div>
+
+                {doctorFormMessage && (
+                  <p
+                    className={`text-xs font-semibold border px-3 py-2 rounded-xl ${
+                      isDark
+                        ? 'text-emerald-300 bg-emerald-950/60 border-emerald-800'
+                        : 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                    }`}
+                  >
+                    {doctorFormMessage}
+                  </p>
+                )}
+              </form>
+            </div>
+
+            <div className={`lg:col-span-7 p-6 rounded-2xl shadow-sm border ${surfaceCard}`}>
+              <h2 className="text-base font-extrabold mb-1">
+                Clinic Physicians &amp; Shift Assignments ({enrichedDoctors.length})
+              </h2>
+              <p className={`text-xs mb-4 ${subtleText}`}>
+                Toggle Morning or Evening shifts directly or click Edit to modify doctor details
+              </p>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr
+                      className={`border-b uppercase ${
+                        isDark
+                          ? 'border-slate-800 text-slate-400'
+                          : 'border-slate-200 text-slate-500'
+                      }`}
+                    >
+                      <th className="py-2 pr-2">Physician</th>
+                      <th className="py-2 pr-2">Branch &amp; Pace</th>
+                      <th className="py-2 pr-2">Assigned Shifts</th>
+                      <th className="py-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-slate-100'}`}>
+                    {enrichedDoctors.map((doc) => {
+                      const shifts = QueueService.normalizeDoctorShifts(doc).shifts;
+                      return (
+                        <tr
+                          key={doc.id}
+                          className={isDark ? 'hover:bg-slate-800/50' : 'hover:bg-slate-50/70'}
+                        >
+                          <td className="py-3 pr-2">
+                            <div className="font-bold">{doc.name}</div>
+                            <div
+                              className={`text-[11px] font-semibold ${
+                                isDark ? 'text-teal-400' : 'text-teal-700'
+                              }`}
+                            >
+                              {doc.specialty} • ₹{doc.fee}
+                            </div>
+                          </td>
+                          <td className="py-3 pr-2">
+                            <div className="font-medium">{doc.clinic_name}</div>
+                            <div className={`text-[11px] ${subtleText}`}>
+                              {doc.dynamic_avg_mins}m avg
+                            </div>
+                          </td>
+                          <td className="py-3 pr-2">
+                            <div className="flex flex-wrap gap-1.5">
+                              {DEFAULT_SHIFTS.map((sh) => {
+                                const assigned = shifts.includes(sh);
+                                return (
+                                  <button
+                                    type="button"
+                                    key={sh}
+                                    onClick={() => onToggleDoctorShift(doc.id, sh)}
+                                    title={`Toggle ${sh} shift for ${doc.name}`}
+                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition ${
+                                      assigned
+                                        ? 'bg-indigo-600 text-white border-indigo-600'
+                                        : isDark
+                                        ? 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+                                        : 'bg-slate-100 text-slate-400 border-slate-200 hover:text-slate-700'
+                                    }`}
+                                  >
+                                    {sh} {assigned ? '✓' : '+'}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </td>
+                          <td className="py-3 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setEditingDoctorId(doc.id)}
+                                className={`px-2.5 py-1 rounded-lg font-semibold ${
+                                  isDark
+                                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                                    : 'bg-slate-100 hover:bg-slate-200 text-slate-800'
+                                }`}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onSelectDoctorForConsole(doc.id)}
+                                className={`px-2.5 py-1 rounded-lg font-semibold border ${
+                                  isDark
+                                    ? 'bg-teal-950/70 hover:bg-teal-900/70 text-teal-300 border-teal-800'
+                                    : 'bg-teal-50 hover:bg-teal-100 text-teal-800 border-teal-200'
+                                }`}
+                              >
+                                Open Console
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      function TokenBookingModal({ bookingDoctor, onClose, onConfirmBooking, ui }) {
+        const [bookingForm, setBookingForm] = useState({
+          patient_name: '',
+          patient_phone: '',
+          shift: 'Morning'
+        });
+
+        useEffect(() => {
+          if (!bookingDoctor) return;
+          const allowedShifts = QueueService.normalizeDoctorShifts(bookingDoctor).shifts;
+          setBookingForm({
+            patient_name: '',
+            patient_phone: '',
+            shift: allowedShifts[0]
+          });
+        }, [bookingDoctor]);
+
+        if (!bookingDoctor) return null;
+
+        const availableShifts = QueueService.normalizeDoctorShifts(bookingDoctor).shifts;
+        const { isDark, surfaceCard, subtleText, inputStyle } = ui;
+
+        const handleSubmit = (e) => {
+          e.preventDefault();
+          if (!bookingForm.patient_name.trim()) return;
+          onConfirmBooking({
+            doctorId: bookingDoctor.id,
+            shift: bookingForm.shift,
+            patientName: bookingForm.patient_name,
+            patientPhone: bookingForm.patient_phone
+          });
+        };
+
+        return (
+          <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+            <div className={`rounded-2xl max-w-md w-full p-6 shadow-xl border ${surfaceCard}`}>
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="text-lg font-extrabold">Book Virtual Token</h3>
+                  <p className={`text-xs mt-0.5 ${subtleText}`}>
+                    {bookingDoctor.name} • {bookingDoctor.specialty} ({bookingDoctor.clinic_name})
+                  </p>
+                </div>
+                <button
+                  onClick={onClose}
+                  className={`p-1 ${
+                    isDark
+                      ? 'text-slate-400 hover:text-slate-200'
+                      : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  <Icon name="x" className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSubmit} className="mt-4 space-y-3.5">
+                <div>
+                  <label className="text-xs font-bold block mb-1">Patient Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={bookingForm.patient_name}
+                    onChange={(e) =>
+                      setBookingForm({ ...bookingForm, patient_name: e.target.value })
+                    }
+                    placeholder="Enter patient name"
+                    className={`w-full text-sm border rounded-xl px-3 py-2 focus:outline-none ${inputStyle}`}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold block mb-1">
+                    Mobile Number (for Live SMS Alerts)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={bookingForm.patient_phone}
+                    onChange={(e) =>
+                      setBookingForm({ ...bookingForm, patient_phone: e.target.value })
+                    }
+                    placeholder="+91-9876543210"
+                    className={`w-full text-sm border rounded-xl px-3 py-2 focus:outline-none ${inputStyle}`}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold block mb-1">
+                    Outpatient Shift (Assigned to {bookingDoctor.name})
+                  </label>
+                  <select
+                    value={bookingForm.shift}
+                    onChange={(e) => setBookingForm({ ...bookingForm, shift: e.target.value })}
+                    className={`w-full text-sm border rounded-xl px-3 py-2 ${inputStyle}`}
+                  >
+                    {DEFAULT_SHIFTS.map((sh) => {
+                      const isAllowed = availableShifts.includes(sh);
+                      return (
+                        <option key={sh} value={sh} disabled={!isAllowed}>
+                          {sh} Shift ({sh === 'Morning' ? '9 AM – 1 PM' : '5 PM – 9 PM'})
+                          {!isAllowed ? ' — Not Scheduled' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div
+                  className={`p-3 rounded-xl text-xs flex justify-between border ${
+                    isDark
+                      ? 'bg-slate-800/70 text-slate-300 border-slate-700'
+                      : 'bg-slate-50 text-slate-600 border-slate-200'
+                  }`}
+                >
+                  <span>
+                    Consultation Fee: <strong>₹{bookingDoctor.fee}</strong>
+                  </span>
+                  <span>
+                    EWMA Avg Pace: <strong>{bookingDoctor.dynamic_avg_mins} mins</strong>
+                  </span>
+                </div>
+
+                <div className="pt-2 flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className={`px-4 py-2 text-xs font-semibold rounded-xl ${
+                      isDark ? 'text-slate-300 hover:bg-slate-800' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white rounded-xl flex items-center gap-1.5 shadow-sm"
+                  >
+                    <Icon name="checkCircle" className="w-4 h-4" /> Confirm Virtual Token
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
+      // ============================================================================
+      // 7. ROOT SHELL (Composes Infrastructure Hooks & Portal Views)
+      // ============================================================================
+      function App() {
+        const { isDark, toggleTheme, ui } = useThemeController();
+        const {
+          store,
+          enrichedDoctors,
+          enrichedTokens,
+          bookToken,
+          callNextPatient,
+          skipAbsentPatient,
+          requeueAbsent,
+          updateDoctorStatusOrDelay,
+          savePrescription,
+          injectEmergencyToken,
+          upsertDoctorProfile,
+          toggleDoctorShift,
+          markTokenCheckedIn,
+          resetDemoState
+        } = useClinicStore();
+
+        const [activePortal, setActivePortal] = useState('patient_portal');
+        const [patientTab, setPatientTab] = useState('directory');
+        const [doctorTab, setDoctorTab] = useState('consultation');
+
+        const [selectedClinic, setSelectedClinic] = useState('all');
+        const [selectedSpecialty, setSelectedSpecialty] = useState('all');
+        const [bookingDoctor, setBookingDoctor] = useState(null);
+        const [trackedTokenId, setTrackedTokenId] = useState(105);
+        const [selectedDoctorId, setSelectedDoctorId] = useState(1);
+        const [editingDoctorId, setEditingDoctorId] = useState(null);
+
+        const filteredDoctors = useMemo(
+          () =>
+            enrichedDoctors.filter((doc) => {
+              const matchClinic =
+                selectedClinic === 'all' || doc.clinic_id === Number(selectedClinic);
+              const matchSpec =
+                selectedSpecialty === 'all' || doc.specialty === selectedSpecialty;
+              return matchClinic && matchSpec;
+            }),
+          [enrichedDoctors, selectedClinic, selectedSpecialty]
+        );
+
+        const trackedToken =
+          enrichedTokens.find((t) => t.id === trackedTokenId) ||
+          enrichedTokens.find((t) => t.state === 'Waiting') ||
+          enrichedTokens[0];
+
+        const consoleDoctor =
+          enrichedDoctors.find((d) => d.id === Number(selectedDoctorId)) || enrichedDoctors[0];
+
+        const handleConfirmBooking = (payload) => {
+          const newId = bookToken(payload);
+          setTrackedTokenId(newId);
+          setBookingDoctor(null);
+        };
+
+        const handleEditDoctorFromConsole = (doc) => {
+          setEditingDoctorId(doc.id);
+          setActivePortal('doctor_portal');
+          setDoctorTab('roster_shifts');
+        };
+
+        const handleUpsertDoctorWithSelection = (editingId, formValues) => {
+          const res = upsertDoctorProfile(editingId, formValues);
+          if (editingId === null && res.createdId) {
+            setSelectedDoctorId(res.createdId);
+          }
+          return res;
+        };
+
+        const handleResetDemo = () => {
+          resetDemoState();
+          setTrackedTokenId(105);
+          setSelectedDoctorId(1);
+          setEditingDoctorId(null);
+        };
+
+        const { surfaceCard, subtleText, inputStyle } = ui;
+
+        return (
+          <div
+            className={`min-h-screen flex flex-col transition-colors ${
+              isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'
+            }`}
+          >
+            <TopPortalHeader
+              activePortal={activePortal}
+              setActivePortal={setActivePortal}
+              patientTab={patientTab}
+              setPatientTab={setPatientTab}
+              doctorTab={doctorTab}
+              setDoctorTab={setDoctorTab}
+              consoleDoctor={consoleDoctor}
+              isDark={isDark}
+              toggleTheme={toggleTheme}
+              onResetDemo={handleResetDemo}
+            />
+
+            <main className="max-w-7xl w-full mx-auto px-4 py-6 flex-1">
+              {activePortal === 'patient_portal' && patientTab === 'directory' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2 space-y-5">
+                    <div className={`p-5 rounded-2xl shadow-sm border ${surfaceCard}`}>
+                      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+                        <div>
+                          <h2 className="text-lg font-extrabold">Multi-Clinic Doctor Directory</h2>
+                          <p className={`text-xs ${subtleText}`}>
+                            Filter across 4 branches &amp; 4 specialties to book an instant virtual token
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <select
+                            value={selectedClinic}
+                            onChange={(e) => setSelectedClinic(e.target.value)}
+                            className={`text-xs font-medium border rounded-xl px-3 py-2 ${inputStyle}`}
+                          >
+                            <option value="all">All Clinics (4 Branches)</option>
+                            {SEED_CLINICS.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          <select
+                            value={selectedSpecialty}
+                            onChange={(e) => setSelectedSpecialty(e.target.value)}
+                            className={`text-xs font-medium border rounded-xl px-3 py-2 ${inputStyle}`}
+                          >
+                            <option value="all">All Specialties</option>
+                            {SPECIALTIES.map((sp) => (
+                              <option key={sp} value={sp}>
+                                {sp}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {filteredDoctors.map((doc) => {
+                          const docShifts = QueueService.normalizeDoctorShifts(doc).shifts;
+                          return (
+                            <div
+                              key={doc.id}
+                              className={`border rounded-xl p-4 hover:border-teal-500 transition flex flex-col justify-between ${
+                                isDark
+                                  ? 'border-slate-800 bg-slate-800/50'
+                                  : 'border-slate-200 bg-slate-50/60'
+                              }`}
+                            >
+                              <div>
+                                <div className="flex items-start justify-between gap-2">
+                                  <div>
+                                    <span
+                                      className={`text-[11px] font-bold uppercase tracking-wider border px-2 py-0.5 rounded ${
+                                        isDark
+                                          ? 'text-teal-300 bg-teal-950/70 border-teal-800'
+                                          : 'text-teal-700 bg-teal-50 border-teal-100'
+                                      }`}
+                                    >
+                                      {doc.specialty}
+                                    </span>
+                                    <h3 className="font-bold text-base mt-1.5">{doc.name}</h3>
+                                    <p className={`text-xs ${subtleText}`}>{doc.qualification}</p>
+                                  </div>
+                                  <span
+                                    className={`text-[11px] font-semibold px-2.5 py-1 rounded-full border ${ui.statusBadge(
+                                      doc.status
+                                    )}`}
+                                  >
+                                    {doc.status}
+                                  </span>
+                                </div>
+
+                                <div className="mt-2.5 flex flex-wrap gap-1.5">
+                                  {docShifts.map((sh) => (
+                                    <span
+                                      key={sh}
+                                      className={`text-[10px] font-bold border px-2 py-0.5 rounded-full ${
+                                        isDark
+                                          ? 'bg-indigo-950/70 text-indigo-300 border-indigo-800'
+                                          : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                      }`}
+                                    >
+                                      {sh} ({sh === 'Morning' ? '9 AM – 1 PM' : '5 PM – 9 PM'})
+                                    </span>
+                                  ))}
+                                </div>
+
+                                <div
+                                  className={`mt-3 space-y-1.5 text-xs ${
+                                    isDark ? 'text-slate-300' : 'text-slate-600'
+                                  }`}
+                                >
+                                  <p className="flex items-center gap-1.5">
+                                    <Icon
+                                      name="mapPin"
+                                      className="w-3.5 h-3.5 text-slate-400 shrink-0"
+                                    />
+                                    <span>{doc.clinic_name}</span>
+                                  </p>
+                                  <p className="flex items-center gap-1.5">
+                                    <Icon
+                                      name="clock"
+                                      className="w-3.5 h-3.5 text-slate-400 shrink-0"
+                                    />
+                                    <span>
+                                      EWMA Pace: <strong>{doc.dynamic_avg_mins} mins/patient</strong>
+                                      {doc.offset_delay_mins > 0 && (
+                                        <span
+                                          className={`font-semibold ml-1 ${
+                                            isDark ? 'text-rose-400' : 'text-rose-600'
+                                          }`}
+                                        >
+                                          (+{doc.offset_delay_mins}m delay)
+                                        </span>
+                                      )}
+                                    </span>
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div
+                                className={`mt-4 pt-3 border-t flex items-center justify-between ${
+                                  isDark ? 'border-slate-700/80' : 'border-slate-200'
+                                }`}
+                              >
+                                <div>
+                                  <span className={`text-[11px] block ${subtleText}`}>
+                                    Now Serving
+                                  </span>
+                                  <span className="font-extrabold text-sm">
+                                    {doc.active_token
+                                      ? `Token #${doc.active_token.token_number}`
+                                      : 'Ready'}
+                                  </span>
+                                  <span className={`text-xs ml-1.5 ${subtleText}`}>
+                                    ({doc.waiting_count} waiting)
+                                  </span>
+                                </div>
+
+                                <button
+                                  onClick={() => setBookingDoctor(doc)}
+                                  className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold px-3.5 py-2 rounded-xl shadow-sm transition"
+                                >
+                                  Book Token • ₹{doc.fee}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <PatientTrackerPanel
+                      enrichedTokens={enrichedTokens}
+                      trackedToken={trackedToken}
+                      setTrackedTokenId={setTrackedTokenId}
+                      smsLogs={store.smsLogs}
+                      onMarkCheckedIn={markTokenCheckedIn}
+                      ui={ui}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {activePortal === 'patient_portal' && patientTab === 'board' && (
+                <div className="space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-xl font-extrabold">Live Waiting Room Queue Board</h2>
+                      <p className={`text-xs ${subtleText}`}>
+                        High-contrast outpatient lobby display across all 4 clinic branches
+                      </p>
+                    </div>
+                    <span
+                      className={`text-xs font-bold px-3 py-1.5 rounded-full flex items-center gap-2 ${
+                        isDark
+                          ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
+                          : 'bg-emerald-100 text-emerald-800'
+                      }`}
+                    >
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" /> Real-Time Telemetry
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {enrichedDoctors.map((doc) => {
+                      const docShifts = QueueService.normalizeDoctorShifts(doc).shifts;
+                      return (
+                        <div
+                          key={doc.id}
+                          className="bg-slate-900 text-white rounded-2xl p-5 shadow-md border border-slate-800 flex flex-col justify-between"
+                        >
+                          <div>
+                            <div className="flex justify-between items-start gap-2">
+                              <span className="text-[11px] text-teal-400 font-bold uppercase tracking-wider">
+                                {doc.specialty}
+                              </span>
+                              <span
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${ui.statusBadge(
+                                  doc.status
+                                )}`}
+                              >
+                                {doc.status}
+                              </span>
+                            </div>
+                            <h3 className="font-bold text-lg mt-1.5">{doc.name}</h3>
+                            <p className="text-xs text-slate-400">{doc.clinic_name}</p>
+                            <div className="mt-2 flex flex-wrap gap-1">
+                              {docShifts.map((sh) => (
+                                <span
+                                  key={sh}
+                                  className="text-[10px] font-semibold bg-slate-800 text-indigo-300 border border-slate-700 px-2 py-0.5 rounded"
+                                >
+                                  {sh}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="my-5 bg-slate-800/90 rounded-xl p-4 text-center border border-slate-700/80">
+                            <span className="text-[11px] uppercase tracking-widest text-slate-400 block">
+                              Now Serving
+                            </span>
+                            <span className="text-5xl font-black text-teal-400 my-1 block">
+                              {doc.active_token ? `#${doc.active_token.token_number}` : '—'}
+                            </span>
+                            <span className="text-xs text-slate-300 font-medium">
+                              {doc.active_token
+                                ? doc.active_token.patient_name
+                                : 'Ready for next patient'}
+                            </span>
+                          </div>
+
+                          <div className="flex justify-between items-center text-xs border-t border-slate-800 pt-3">
+                            <div>
+                              <span className="text-slate-400 block">Next in Line</span>
+                              <span className="font-extrabold text-amber-400 text-sm">
+                                {doc.next_token ? `#${doc.next_token.token_number}` : 'None'}
+                              </span>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-slate-400 block">EWMA Avg Pace</span>
+                              <span className="font-bold text-white">
+                                {doc.dynamic_avg_mins}m / patient
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {activePortal === 'patient_portal' && patientTab === 'heatmap' && (
+                <div className={`p-6 rounded-2xl shadow-sm border space-y-5 ${surfaceCard}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-lg font-extrabold">Historical Clinic Wait-Time Heatmap</h2>
+                      <p className={`text-xs ${subtleText}`}>
+                        Average waiting minutes by day of week and time block to help patients pick low-traffic consultation hours
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-3 text-xs font-semibold">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-3 h-3 rounded bg-emerald-300 inline-block" /> Low (≤15m)
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-3 h-3 rounded bg-amber-300 inline-block" /> Moderate (16–25m)
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-3 h-3 rounded bg-rose-300 inline-block" /> Peak (&gt;25m)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {SEED_CLINICS.map((clinic) => (
+                      <div
+                        key={clinic.id}
+                        className={`border rounded-xl p-4 ${
+                          isDark
+                            ? 'border-slate-800 bg-slate-800/40'
+                            : 'border-slate-200 bg-slate-50/40'
+                        }`}
+                      >
+                        <h3 className="font-bold">{clinic.name}</h3>
+                        <p className={`text-xs mb-3 ${subtleText}`}>{clinic.address}</p>
+
+                        <table className="w-full text-center text-xs">
+                          <thead>
+                            <tr
+                              className={`border-b ${
+                                isDark
+                                  ? 'text-slate-400 border-slate-700'
+                                  : 'text-slate-500 border-slate-200'
+                              }`}
+                            >
+                              <th className="py-1.5 text-left">Day</th>
+                              <th className="py-1.5">9 AM – 11 AM</th>
+                              <th className="py-1.5">11 AM – 1 PM</th>
+                              <th className="py-1.5">5 PM – 7 PM</th>
+                              <th className="py-1.5">7 PM – 9 PM</th>
+                            </tr>
+                          </thead>
+                          <tbody
+                            className={`divide-y ${
+                              isDark ? 'divide-slate-800' : 'divide-slate-100'
+                            }`}
+                          >
+                            {Object.entries(clinic.heatmap).map(([day, slots]) => (
+                              <tr key={day}>
+                                <td
+                                  className={`py-1.5 font-bold text-left ${
+                                    isDark ? 'text-slate-200' : 'text-slate-700'
+                                  }`}
+                                >
+                                  {day}
+                                </td>
+                                {slots.map((mins, idx) => {
+                                  const badgeStyle =
+                                    mins <= 15
+                                      ? isDark
+                                        ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/60'
+                                        : 'bg-emerald-100 text-emerald-900'
+                                      : mins <= 25
+                                      ? isDark
+                                        ? 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                                        : 'bg-amber-100 text-amber-900'
+                                      : isDark
+                                      ? 'bg-rose-950/80 text-rose-300 border border-rose-800/60'
+                                      : 'bg-rose-100 text-rose-900';
+                                  return (
+                                    <td key={idx} className="p-1">
+                                      <span className={`block py-1 rounded-md font-bold ${badgeStyle}`}>
+                                        {mins}m
+                                      </span>
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {activePortal === 'doctor_portal' && doctorTab === 'consultation' && consoleDoctor && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2">
+                    <DoctorConsolePanel
+                      enrichedDoctors={enrichedDoctors}
+                      enrichedTokens={enrichedTokens}
+                      selectedDoctorId={selectedDoctorId}
+                      setSelectedDoctorId={setSelectedDoctorId}
+                      onEditDoctor={handleEditDoctorFromConsole}
+                      onUpdateStatusOrDelay={updateDoctorStatusOrDelay}
+                      onCallNext={callNextPatient}
+                      onSkipAbsent={skipAbsentPatient}
+                      onRequeueAbsent={requeueAbsent}
+                      onSavePrescription={savePrescription}
+                      ui={ui}
+                    />
+                  </div>
+                  <div className="space-y-5">
+                    <EmergencyTriagePanel
+                      selectedDoctorId={selectedDoctorId}
+                      onInjectEmergency={injectEmergencyToken}
+                      isDark={isDark}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {activePortal === 'doctor_portal' && doctorTab === 'roster_shifts' && (
+                <DoctorShiftManagerPanel
+                  enrichedDoctors={enrichedDoctors}
+                  editingDoctorId={editingDoctorId}
+                  setEditingDoctorId={setEditingDoctorId}
+                  onUpsertDoctor={handleUpsertDoctorWithSelection}
+                  onToggleDoctorShift={toggleDoctorShift}
+                  onSelectDoctorForConsole={(docId) => {
+                    setSelectedDoctorId(docId);
+                    setDoctorTab('consultation');
+                  }}
+                  ui={ui}
+                />
+              )}
+
+              {activePortal === 'split_demo' && consoleDoctor && (
+                <div className="space-y-4">
+                  <div className="bg-teal-900 text-white px-4 py-3 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span>
+                      <strong>Live Hackathon Split-Screen Demo:</strong> Click{' '}
+                      <em>&quot;Call Next Patient&quot;</em> on the right (Doctor Console) and watch Patient A&apos;s Token #14 on the left jump from 36 mins to 24 mins with an Amber Alert!
+                    </span>
+                    <span className="text-teal-300 font-semibold">
+                      Also syncs across separate browser windows
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <div className="lg:col-span-5">
+                      <PatientTrackerPanel
+                        enrichedTokens={enrichedTokens}
+                        trackedToken={trackedToken}
+                        setTrackedTokenId={setTrackedTokenId}
+                        smsLogs={store.smsLogs}
+                        onMarkCheckedIn={markTokenCheckedIn}
+                        ui={ui}
+                      />
+                    </div>
+                    <div className="lg:col-span-7">
+                      <DoctorConsolePanel
+                        enrichedDoctors={enrichedDoctors}
+                        enrichedTokens={enrichedTokens}
+                        selectedDoctorId={selectedDoctorId}
+                        setSelectedDoctorId={setSelectedDoctorId}
+                        onEditDoctor={handleEditDoctorFromConsole}
+                        onUpdateStatusOrDelay={updateDoctorStatusOrDelay}
+                        onCallNext={callNextPatient}
+                        onSkipAbsent={skipAbsentPatient}
+                        onRequeueAbsent={requeueAbsent}
+                        onSavePrescription={savePrescription}
+                        ui={ui}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </main>
+
+            <TokenBookingModal
+              bookingDoctor={bookingDoctor}
+              onClose={() => setBookingDoctor(null)}
+              onConfirmBooking={handleConfirmBooking}
+              ui={ui}
+            />
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
